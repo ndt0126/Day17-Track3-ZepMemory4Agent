@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import requests
+
 from .config import settings
 
 SYSTEM_INSTRUCTION = (
@@ -24,8 +26,63 @@ SYSTEM_INSTRUCTION = (
 
 
 def gemini_available() -> bool:
-    """True when a key is configured. UI uses this to show status."""
-    return bool(settings.gemini_api_key)
+    """True when an LLM key (OpenRouter or Gemini) is configured. UI uses this to show status."""
+    return bool(settings.openrouter_api_key or settings.gemini_api_key)
+
+
+def get_active_model_name() -> str:
+    if settings.openrouter_api_key:
+        return f"OpenRouter: {settings.openrouter_model}"
+    if settings.gemini_api_key:
+        return f"Gemini: {settings.gemini_model}"
+    return "None"
+
+
+def _generate_openrouter_reply(
+    memory_context: str,
+    history: list[dict[str, str]],
+    user_message: str,
+    *,
+    model: str | None = None,
+) -> str:
+    grounding = (
+        "Retrieved memory context for this turn:\n"
+        "-------------------------------------\n"
+        f"{memory_context.strip() or '(no memory retrieved)'}\n"
+        "-------------------------------------\n\n"
+        f"User message: {user_message}"
+    )
+
+    messages = [{"role": "system", "content": SYSTEM_INSTRUCTION}]
+    for msg in history:
+        role = "user" if msg.get("role") == "user" else "assistant"
+        content = msg.get("content", "")
+        if content:
+            messages.append({"role": role, "content": content})
+    messages.append({"role": "user", "content": grounding})
+
+    headers = {
+        "Authorization": f"Bearer {settings.openrouter_api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "http://localhost:8501",
+        "X-Title": "VinUni Lab 17 Memory Agent Demo",
+    }
+    payload = {
+        "model": model or settings.openrouter_model or "google/gemini-2.5-flash-lite",
+        "messages": messages,
+        "temperature": 0.3,
+        "max_tokens": 800,
+    }
+
+    resp = requests.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers=headers,
+        json=payload,
+        timeout=45,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return data["choices"][0]["message"]["content"].strip()
 
 
 def _to_contents(history: list[dict[str, str]]) -> list[dict[str, Any]]:
@@ -50,20 +107,22 @@ def generate_reply(
     *,
     model: str | None = None,
 ) -> str:
-    """Generate a grounded assistant reply with Gemini.
+    """Generate a grounded assistant reply with OpenRouter or Gemini.
 
     Raises RuntimeError if no key, and lets SDK/network errors bubble up so the
     UI can surface them. `history` should include the latest user turn or not —
     `user_message` is appended as the final user turn regardless.
     """
+    if settings.openrouter_api_key:
+        return _generate_openrouter_reply(memory_context, history, user_message, model=model)
+
     if not settings.gemini_api_key:
         raise RuntimeError(
-            "GEMINI_API_KEY is missing. Copy .env.example to .env and add a "
-            "Google AI Studio key to enable chat replies."
+            "Neither OPENROUTER_API_KEY nor GEMINI_API_KEY is configured. "
+            "Add one to .env to enable chat replies."
         )
 
     # Lazy import so the rest of the package works without google-genai installed
-    # (tests, report generation, retrieval benchmarks never need it).
     from google import genai
     from google.genai import types
 

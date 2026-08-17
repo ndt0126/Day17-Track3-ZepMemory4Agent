@@ -33,7 +33,7 @@ if str(_ROOT) not in sys.path:
 import streamlit as st
 
 from src.config import settings
-from src.llm import gemini_available, generate_reply
+from src.llm import gemini_available, generate_reply, get_active_model_name
 from src.memory_student import StudentMemory
 from src.short_term import ShortTermMemory
 from src.utils import GOLDEN_PATH, load_dataset, load_json
@@ -155,9 +155,9 @@ def main() -> None:
         zep_ok = bool(settings.zep_api_key)
         st.markdown(("✅" if zep_ok else "⚠️") + " Zep API key "
                     + ("configured" if zep_ok else "missing"))
-        st.markdown(("✅" if gemini_available() else "⚠️") + " Gemini key "
+        st.markdown(("✅" if gemini_available() else "⚠️") + " LLM key "
                     + ("configured" if gemini_available() else "missing"))
-        st.caption(f"Chat model: `{settings.gemini_model}`")
+        st.caption(f"Model: `{get_active_model_name()}`")
         st.divider()
 
         cases = load_cases()
@@ -183,13 +183,37 @@ def main() -> None:
         st.session_state.chat = []
         st.session_state.pop("last_result", None)
 
-    col_run, _ = st.columns([1, 3])
+    col_run, col_chat, col_clear = st.columns([1.2, 1.4, 0.8])
     if col_run.button("▶️ Run retrieval on this case", use_container_width=True):
         try:
             memory = StudentMemory(get_zep_client())
             st.session_state.last_result = retrieve_for_case(memory, case, st.session_state.chat)
         except Exception as exc:  # noqa: BLE001
             st.exception(exc)
+
+    if col_chat.button("💬 Ask & Chat as this user", use_container_width=True):
+        query = case.get("query", "")
+        if query:
+            st.session_state.chat.append({"role": "user", "content": query})
+            try:
+                memory = StudentMemory(get_zep_client())
+                res = retrieve_for_case(memory, case, st.session_state.chat)
+                st.session_state.last_result = res
+                context = res.get("merged_context", "")
+                if gemini_available():
+                    with st.spinner("AI đang trả lời dựa trên bộ nhớ..."):
+                        reply = generate_reply(context, st.session_state.chat[:-1], query)
+                else:
+                    reply = ("_(LLM key missing — showing retrieved context instead)_\n\n"
+                             + (context[:1500] or "(no memory retrieved)"))
+                st.session_state.chat.append({"role": "assistant", "content": reply})
+            except Exception as exc:  # noqa: BLE001
+                st.exception(exc)
+
+    if col_clear.button("🗑️ Clear chat", use_container_width=True):
+        st.session_state.chat = []
+        st.session_state.pop("last_result", None)
+        st.rerun()
 
     result = st.session_state.get("last_result")
     if result:
@@ -233,7 +257,7 @@ def main() -> None:
             if gemini_available():
                 reply = generate_reply(context, st.session_state.chat[:-1], prompt)
             else:
-                reply = ("_(Gemini key missing — showing retrieved context instead)_\n\n"
+                reply = ("_(LLM key missing — showing retrieved context instead)_\n\n"
                          + (context[:1500] or "(no memory retrieved)"))
             st.session_state.chat.append({"role": "assistant", "content": reply})
             with st.chat_message("assistant"):
